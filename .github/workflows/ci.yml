@@ -1,0 +1,24 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    # GitHub-hosted runners have no GPU, so CI can only check that the package
+    # imports and the sources parse. The numerical suite needs CUDA and is run
+    # locally / on a self-hosted GPU runner.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Syntax check
+        run: python -m compileall -q src bench tests
+      - name: Install lint tooling
+        run: pip install ruff
+      - name: Ruff
+        run: ruff check src bench tests --select E9,F63,F7,F82
