@@ -82,8 +82,10 @@ def bench_one(B, H, N, D, dtype, causal, backward, include_naive):
             "tflops": (flops / (ms * 1e-3) / 1e12) if ms else None,
             "oom": ms is None,
         }
-    del q, k, v
-    torch.cuda.empty_cache()
+    # No `del q, k, v` here: the lambdas above close over those names, and a
+    # `del` in the same scope leaves the closures referring to unbound names.
+    # Returning drops the last references anyway; the caller reclaims the
+    # blocks once this frame is gone.
     return row
 
 
@@ -158,6 +160,10 @@ def main():
             args.batch, args.heads, N, args.head_dim,
             DTYPES[args.dtype], args.causal, args.backward, not args.no_naive,
         ))
+        # bench_one's frame is gone, so its tensors are unreachable. Hand the
+        # blocks back to the driver before allocating the next, larger shape --
+        # on a small card this is the difference between finishing and OOMing.
+        torch.cuda.empty_cache()
 
     md = to_markdown(rows, meta)
     with open(args.out, "w", encoding="utf-8") as fh:
