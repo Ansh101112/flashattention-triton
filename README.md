@@ -10,6 +10,11 @@ actually does *more* arithmetic than normal attention in the backward pass, and
 it is still much faster, purely because of what it does or doesn't write to GPU
 main memory.
 
+There's an interactive page at
+**[ansh101112.github.io/flashattention-triton](https://ansh101112.github.io/flashattention-triton/)**
+that runs the tiled inner loop in the browser, so you can watch the blocks go
+through and check for yourself that the online softmax comes out exact.
+
 Full walkthrough of the maths is in [`docs/DERIVATION.md`](docs/DERIVATION.md).
 
 ## The idea in one diagram
