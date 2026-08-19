@@ -1,17 +1,18 @@
-"""Benchmark harness: latency, achieved TFLOP/s and peak memory.
+"""Measures speed and memory. Run this to fill in docs/RESULTS.md.
 
-Run this to produce the numbers that go in docs/RESULTS.md and the README.
-Nothing in this repo hard-codes a speedup -- every number is generated here.
+No number in this repo is hardcoded -- everything comes out of this script.
 
     python bench/bench_attention.py --causal --dtype fp16 --out docs/RESULTS.md
 
-The three implementations compared:
-    flash   -- the Triton kernel in this repo
-    sdpa    -- torch.nn.functional.scaled_dot_product_attention (fused, strong)
-    naive   -- explicit softmax(QK^T)V, materialises the N x N matrix
+Compares three implementations:
+    flash   the Triton kernel in this repo
+    sdpa    torch.nn.functional.scaled_dot_product_attention (already fused,
+            so this is the real bar to clear)
+    naive   plain softmax(Q@K^T)@V, builds the whole N x N matrix
 
-`naive` OOMs first; the harness records that instead of crashing, because the
-sequence length at which the baseline dies is itself a headline result.
+naive runs out of memory long before the other two. The script catches that and
+records "OOM" instead of crashing, because the sequence length where the naive
+version dies is itself one of the more interesting results.
 """
 
 import argparse
@@ -29,7 +30,11 @@ DTYPES = {"fp16": torch.float16, "bf16": torch.bfloat16}
 
 
 def measure(fn, backward=False):
-    """Median latency in ms and peak memory delta in MiB, or None on OOM."""
+    """Times fn and records how much memory it needed.
+
+    Returns (milliseconds, peak MiB), or (None, None) if it ran out of memory.
+    Median is used rather than mean so one slow first run doesn't skew it.
+    """
     try:
         torch.cuda.synchronize()
         torch.cuda.empty_cache()

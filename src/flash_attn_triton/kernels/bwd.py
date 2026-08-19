@@ -1,26 +1,34 @@
-"""FlashAttention backward kernels in Triton.
+"""FlashAttention backward pass, in Triton.
 
-Backward is the part that makes the memory saving real: a naive implementation
-would need the N x N probability matrix P again to form dQ/dK/dV. Instead we
-*recompute* P tile-by-tile from Q, K and the saved log-sum-exp vector L, so the
-backward pass keeps the same O(N) activation footprint as the forward.
+The forward pass avoided storing the N x N matrix. If backward just rebuilt and
+stored it, we would have gained nothing -- so this is the part that actually
+makes the memory saving real.
 
-Gradients (S = scale * Q K^T, P = softmax(S), O = P V):
+The trick: instead of storing P (the softmax probabilities), we RECOMPUTE each
+tile of it from Q, K and the saved L vector, one tile at a time. That costs an
+extra matmul but saves a factor of N in memory.
 
-    dV = P^T dO
-    dP = dO V^T
-    dS = P * (dP - delta),   delta_i = sum_j P_ij dP_ij = sum_d dO_id O_id
-    dQ = scale * dS  K
-    dK = scale * dS^T Q
+The gradients we need (S = scale * Q @ K^T, P = softmax(S), O = P @ V):
 
-delta is the cheap trick here: the row-wise softmax Jacobian term collapses to a
-single dot product of dO and O, which a small pre-pass computes in O(N*d).
+    dV = P^T @ dO
+    dP = dO @ V^T
+    dS = P * (dP - delta)      where delta_i = sum over d of dO[i,d] * O[i,d]
+    dQ = scale * dS  @ K
+    dK = scale * dS^T @ Q
 
-Two separate kernels are used rather than one fused kernel:
-  * `_attn_bwd_dkdv` parallelises over K/V tiles and loops over Q tiles.
-  * `_attn_bwd_dq`   parallelises over Q tiles and loops over K/V tiles.
-This avoids cross-block atomics on dQ at the cost of recomputing QK^T twice. On
-Ampere that trade is favourable because fp32 atomics on dQ serialise badly.
+About `delta`: differentiating softmax normally gives an N x N Jacobian per row,
+which would be horrible. But when you contract it with dP the whole thing
+collapses to one number per row, and that number happens to equal the row dot
+product of dO and O. So a tiny O(N*d) pre-pass computes it and the expensive
+kernels just read it. That's `_attn_bwd_preprocess`.
+
+Why two kernels instead of one:
+  dQ sums over key tiles, but dK and dV sum over query tiles. One fused kernel
+  would need atomics on whichever one it didn't parallelise over. So:
+    _attn_bwd_dkdv - one program per K/V tile, loops over Q tiles
+    _attn_bwd_dq   - one program per Q tile, loops over K/V tiles
+  This recomputes Q @ K^T twice, but on Ampere that's still faster than fp32
+  atomics on dQ, which serialise badly.
 """
 
 import triton
@@ -38,7 +46,11 @@ def _attn_bwd_preprocess(
     BLOCK_M: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
 ):
-    """Delta[i] = sum_d dO[i, d] * O[i, d] -- the softmax-Jacobian row term."""
+    """Computes Delta[i] = sum over d of dO[i,d] * O[i,d], one value per row.
+
+    Cheap O(N*d) pass. See the module docstring for why this one number replaces
+    the whole softmax Jacobian.
+    """
     start_m = tl.program_id(0)
     off_hz = tl.program_id(1)
     off_z = off_hz // H
@@ -92,8 +104,9 @@ def _attn_bwd_dkdv(
     dk = tl.zeros([BLOCK_N, BLOCK_DMODEL], dtype=tl.float32)
     dv = tl.zeros([BLOCK_N, BLOCK_DMODEL], dtype=tl.float32)
 
-    # Under causal masking, query row m only attends to key col n <= m, so K tile
-    # `start_n` is only touched by Q tiles at or after it.
+    # With a causal mask, query row m only looks at key column n <= m. So this
+    # K tile is only used by Q tiles at or after it, and we can start the loop
+    # there instead of at 0.
     if IS_CAUSAL:
         lo = (start_n * BLOCK_N // BLOCK_M) * BLOCK_M
     else:
@@ -111,7 +124,8 @@ def _attn_bwd_dkdv(
         q = tl.load(q_ptrs, mask=mask_m[:, None], other=0.0)
         do = tl.load(do_ptrs, mask=mask_m[:, None], other=0.0)
 
-        # Recompute the probability tile from Q, K and the saved LSE.
+        # Rebuild this tile of P from scratch: P = exp(scores - L).
+        # This is the recomputation that lets us skip storing P entirely.
         qk = tl.dot(q, tl.trans(k), out_dtype=tl.float32) * sm_scale
         valid = mask_m[:, None] & mask_n[None, :]
         if IS_CAUSAL:

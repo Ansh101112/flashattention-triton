@@ -1,8 +1,12 @@
-"""Public PyTorch interface: a differentiable `flash_attn` op and an nn.Module.
+"""The PyTorch-facing API. This is the file you use from normal model code.
 
-The autograd.Function saves only Q, K, V, O and the log-sum-exp vector L. The
-N x N score matrix is never stored, which is where the memory win comes from:
-activation memory for attention drops from O(B * H * N^2) to O(B * H * N * d).
+Two things here:
+  flash_attn(q, k, v)     a normal differentiable function
+  FlashSelfAttention      an nn.Module you can drop into an existing model
+
+The autograd.Function saves only Q, K, V, O and the L vector for backward.
+It never saves the N x N score matrix, which is the whole point: attention
+activation memory goes from O(B * H * N^2) down to O(B * H * N * d).
 """
 
 import math

@@ -1,24 +1,38 @@
-"""FlashAttention-2 forward kernel in Triton.
+"""FlashAttention-2 forward pass, written in Triton.
 
-Reference: Dao et al., "FlashAttention: Fast and Memory-Efficient Exact Attention
-with IO-Awareness" (2022) and "FlashAttention-2" (2023).
+Papers: arXiv:2205.14135 (FlashAttention) and arXiv:2307.08691 (FlashAttention-2).
 
-Key ideas implemented here:
-  * Tiling: Q is split into blocks of BLOCK_M rows; K/V into blocks of BLOCK_N.
-    A Q tile and the running output accumulator stay in SRAM/registers for the
-    whole inner loop, so the O(N^2) attention matrix is never materialised in HBM.
-  * Online softmax: the running max `m_i` and running sum `l_i` are updated per
-    K/V tile, and the accumulator is rescaled by exp(m_old - m_new). This gives
-    the exact softmax in a single pass over K/V.
-  * FlashAttention-2 deferred normalisation: we accumulate the *unnormalised*
-    output and divide by `l_i` once, after the inner loop, instead of rescaling
-    by 1/l on every tile. That removes one divide per inner iteration.
-  * Causal masking is split into a "full" range of K tiles that need no mask and
-    a short "diagonal" range that does, so the masked branch is only taken for
-    the one tile that straddles the diagonal.
+Normal attention computes the full N x N score matrix and writes it to GPU main
+memory (HBM). At 8K context that matrix is 128 MB per head, and moving it back
+and forth is what makes attention slow -- not the maths.
 
-The log-sum-exp statistic L = m + log(l) is saved for the backward pass, which
-lets backward recompute the softmax probabilities without storing the S matrix.
+What this kernel does instead:
+
+1. TILING
+   Split Q into blocks of BLOCK_M rows and K/V into blocks of BLOCK_N rows.
+   One program handles one Q tile and loops over all the K/V tiles. The Q tile
+   and the running output stay in fast on-chip memory the whole time, so the
+   N x N matrix is never written to HBM at all.
+
+2. ONLINE SOFTMAX
+   Problem: softmax needs the sum over the whole row, but we only ever see one
+   tile of the row at a time.
+   Fix: keep a running max (m_i) and running sum (l_i). When a new tile has a
+   bigger max, rescale what we already accumulated by exp(m_old - m_new).
+   This is exact algebra, not an approximation -- the answer is identical to
+   normal attention.
+
+3. NORMALISE AT THE END (this is the FlashAttention-2 part)
+   Version 1 divided by l on every tile. Here we accumulate the un-divided
+   output and divide once, after the loop. Saves a division per tile per row.
+
+4. CAUSAL MASK SPLIT
+   With a causal mask, most K tiles are either fully visible or fully hidden.
+   Only the one tile sitting on the diagonal needs an actual mask. So we loop
+   over the fully-visible tiles first and only apply tl.where on that last one.
+
+At the end we save L = m + log(l) (one float per row, not N x N). The backward
+pass uses it to rebuild the softmax values without having stored them.
 """
 
 import triton
@@ -69,7 +83,8 @@ def _attn_fwd(
         base=q_base, shape=(N_CTX, BLOCK_DMODEL), strides=(stride_qm, stride_qk),
         offsets=(start_m * BLOCK_M, 0), block_shape=(BLOCK_M, BLOCK_DMODEL), order=(1, 0),
     )
-    # K is loaded transposed so the QK^T dot maps onto the tensor-core layout.
+    # K is loaded already transposed. We need K^T for Q @ K^T anyway, and this
+    # layout is the one the tensor cores want, so we avoid a separate transpose.
     K_block_ptr = tl.make_block_ptr(
         base=k_base, shape=(BLOCK_DMODEL, N_CTX), strides=(stride_kk, stride_kn),
         offsets=(0, 0), block_shape=(BLOCK_DMODEL, BLOCK_N), order=(0, 1),
@@ -86,20 +101,27 @@ def _attn_fwd(
     offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_n = tl.arange(0, BLOCK_N)
 
-    # Running softmax state, kept in registers for the whole inner loop.
+    # The running softmax state. These live in registers for the whole loop.
+    #   m_i = biggest score seen so far in each row
+    #   l_i = running sum of exp(score - m_i)
+    #   acc = running output, not yet divided by l_i
     m_i = tl.full([BLOCK_M], value=-float("inf"), dtype=tl.float32)
     l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
     acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
 
-    # Fold log2(e) into the scale so we can use the faster exp2 intrinsic.
+    # exp2 is a single hardware instruction, exp is not. Since
+    # exp(x) == exp2(x * log2(e)), we bake log2(e) into the scale here once and
+    # then use exp2 everywhere in the loop.
     qk_scale = sm_scale * 1.44269504089
     q = tl.load(Q_block_ptr, boundary_check=(0, 1), padding_option="zero")
     q = (q * qk_scale).to(q.dtype)
 
     if IS_CAUSAL:
-        # Only K tiles up to and including the diagonal contribute.
+        # A query at row m can only see keys at column n <= m, so we stop at
+        # the diagonal instead of looping over the whole sequence.
         hi = tl.minimum((start_m + 1) * BLOCK_M, N_CTX)
-        # Tiles strictly below the diagonal need no mask.
+        # Everything before n_full is entirely below the diagonal, so it needs
+        # no mask at all. Only tiles from n_full onwards do.
         n_full = (start_m * BLOCK_M) // BLOCK_N * BLOCK_N
     else:
         hi = N_CTX
@@ -112,18 +134,25 @@ def _attn_fwd(
         k = tl.load(K_block_ptr, boundary_check=(0, 1), padding_option="zero")
         qk = tl.dot(q, k, out_dtype=tl.float32)
 
-        # Out-of-range columns (ragged tail) must not win the max.
+        # If N isn't a multiple of BLOCK_N the last tile has junk columns.
+        # Set them to -inf so they can't become the row max and can't add
+        # anything to the sum.
         cols = start_n + offs_n
         qk = tl.where(cols[None, :] < N_CTX, qk, -float("inf"))
         if IS_CAUSAL:
             if needs_mask:
                 qk = tl.where(offs_m[:, None] >= cols[None, :], qk, -float("inf"))
 
-        # --- online softmax update (FlashAttention-2 form) ---
+        # --- the online softmax update ---
+        # m_ij is the new max after seeing this tile.
         m_ij = tl.maximum(m_i, tl.max(qk, 1))
+        # A fully masked row would leave m_ij at -inf and produce NaN below.
         m_ij = tl.where(m_ij == -float("inf"), 0.0, m_ij)
+        # exp of this tile's scores, relative to the new max.
         p = tl.math.exp2(qk - m_ij[:, None])
-        alpha = tl.math.exp2(m_i - m_ij)          # rescale factor for old state
+        # alpha corrects everything we accumulated under the OLD max.
+        # If the max didn't change, alpha is 1 and nothing is rescaled.
+        alpha = tl.math.exp2(m_i - m_ij)
         l_i = l_i * alpha + tl.sum(p, 1)
         acc = acc * alpha[:, None]
 
@@ -135,11 +164,14 @@ def _attn_fwd(
         V_block_ptr = tl.advance(V_block_ptr, (BLOCK_N, 0))
         start_n += BLOCK_N
 
-    # Deferred normalisation: one divide per query row, not per K tile.
+    # Now that the loop is done, divide once. This is the deferred
+    # normalisation -- one divide per row instead of one per tile.
+    # l_safe guards against dividing by zero on a fully masked row.
     l_safe = tl.where(l_i == 0.0, 1.0, l_i)
     acc = acc / l_safe[:, None]
 
-    # log-sum-exp in natural log, consumed by the backward pass.
+    # Save L = m + log(l) for the backward pass. Converting back to natural log
+    # here because that's what the backward kernels expect.
     lse = m_i * 0.69314718055994530942 + tl.log(l_safe)
     lse = tl.where(l_i == 0.0, -float("inf"), lse)
     tl.store(L + off_hz * N_CTX + offs_m, lse, mask=offs_m < N_CTX)

@@ -1,10 +1,11 @@
-"""Numerical parity tests against the fp32 reference.
+"""Tests that the kernel gives the same answer as plain PyTorch attention.
 
-The claim FlashAttention makes is *exactness*: it is not an approximation, so
-the only error allowed is the fp16/bf16 rounding the reference also incurs.
-These tests pin that down over the shape and masking space, including ragged
-sequence lengths that do not divide the tile size -- historically where tiled
-kernels break.
+FlashAttention is supposed to be EXACT, not an approximation. So the only
+difference allowed here is normal fp16/bf16 rounding, which the reference has
+too. That's why the tolerances are dtype-level and not loose.
+
+The sequence lengths 200 and 999 are deliberate: they aren't multiples of any
+tile size, and the ragged last tile is where tiled kernels usually break.
 """
 
 import math

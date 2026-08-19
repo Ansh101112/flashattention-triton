@@ -1,9 +1,11 @@
-"""Naive PyTorch attention -- the correctness oracle and the memory baseline.
+"""Plain PyTorch attention. Used for two things.
 
-This is the O(N^2)-memory formulation the kernel replaces. Keeping it around
-matters for two reasons: it defines "exact" for the numerical tests, and it is
-the honest baseline for the memory plots (torch SDPA already dispatches to a
-fused kernel, so comparing only against SDPA hides the actual saving).
+1. As the correct answer to test against. It runs in fp32 and builds the full
+   N x N matrix, so whatever it produces is what the kernel must match.
+
+2. As the honest memory baseline. torch's own SDPA is already a fused kernel,
+   so comparing only against SDPA would hide how much memory the tiling
+   actually saves. This version shows the real before/after.
 """
 
 import math
@@ -36,11 +38,15 @@ def torch_sdpa(q, k, v, causal=False, sm_scale=None):
 
 
 def attention_flops(batch, heads, seqlen, head_dim, causal=False, backward=False):
-    """FLOPs for one attention op, used to convert latency into TFLOP/s.
+    """How many floating point ops one attention call does.
 
-    Forward is two matmuls (QK^T and PV), each 2*N*N*d MACs per head. Causal
-    masking halves the useful work. Backward is conventionally counted at 2.5x
-    forward (dQ, dK, dV plus the recomputed scores).
+    Used to turn a millisecond number into TFLOP/s so results are comparable
+    across GPUs.
+
+    Forward is two matmuls (Q@K^T and P@V), each 2*N*N*d per head.
+    Causal masking roughly halves the useful work.
+    Backward is counted at 2.5x forward, which is the usual convention
+    (dQ, dK, dV plus recomputing the scores).
     """
     flops = 2 * 2 * batch * heads * seqlen * seqlen * head_dim
     if causal:
