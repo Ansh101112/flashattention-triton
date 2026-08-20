@@ -1,95 +1,50 @@
 <!doctype html>
-<html lang="en" data-theme="dark">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>FlashAttention in Triton</title>
 <meta name="description" content="Exact IO-aware FlashAttention-2 forward and backward kernels in Triton. Watch the tiled inner loop run, and see why the N x N score matrix never reaches GPU main memory.">
-<meta name="color-scheme" content="dark light">
+<meta name="color-scheme" content="light">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap">
-<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2032%2032'%3E%3Crect%20width='32'%20height='32'%20fill='%230C0F14'/%3E%3Crect%20x='4'%20y='4'%20width='11'%20height='11'%20fill='%23FFB020'/%3E%3Crect%20x='17'%20y='4'%20width='11'%20height='11'%20fill='%233E5C78'/%3E%3Crect%20x='4'%20y='17'%20width='11'%20height='11'%20fill='%233E5C78'/%3E%3Crect%20x='17'%20y='17'%20width='11'%20height='11'%20fill='%23FFB020'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2032%2032'%3E%3Crect%20width='32'%20height='32'%20fill='%23FFFFFF'/%3E%3Crect%20x='3'%20y='3'%20width='12'%20height='12'%20fill='%23C2371A'/%3E%3Crect%20x='17'%20y='3'%20width='12'%20height='12'%20fill='%23C6CCD3'/%3E%3Crect%20x='3'%20y='17'%20width='12'%20height='12'%20fill='%23C6CCD3'/%3E%3Crect%20x='17'%20y='17'%20width='12'%20height='12'%20fill='%23C6CCD3'/%3E%3C/svg%3E">
 <style>
 /* ---------------------------------------------------------------
-   Tokens. The palette comes from the memory hierarchy itself:
-   cool blue-biased neutrals for HBM, signal amber for on-chip.
-   Dark is the base; light redefines values only, never components.
+   Kernel datasheet. White paper, black ink, one spot colour.
+   The palette is deliberately single-theme: this is a printed spec
+   sheet, not an app chrome, so every value is painted explicitly
+   and nothing is left to inherit the host's ground.
    --------------------------------------------------------------- */
 :root {
-  --ground:   #0C0F14;
-  --surface:  #12171F;
-  --raised:   #18202B;
-  --line:     #202A38;
-  --line-soft:#18212C;
-  --text:     #DDE3EC;
-  --muted:    #7E8B9E;
-  --faint:    #4A5768;
+  --ground:   #FFFFFF;   /* the page */
+  --surface:  #FFFFFF;   /* figures sit on the same paper, split by rules */
+  --raised:   #F4F5F7;   /* inset strips: panel bars, code, table wash */
+  --line:     #D9DCE0;   /* hairline */
+  --line-soft:#E9EBEE;
+  --text:     #14181D;   /* blackish, very slightly cool */
+  --muted:    #6B727A;
+  --faint:    #9AA1A9;
 
-  --hot:      #FFB020;
-  --hot-dim:  #6B4A10;
-  --hot-ink:  #0C0F14;
-  --cold:     #4C7099;
-  --cold-dim: #22364A;
-  --alarm:    #E2564B;
-  --good:     #4FB783;
+  --hot:      #C2371A;   /* the one spot colour: live on chip, this kernel */
+  --hot-dim:  #FBE9E4;
+  --hot-ink:  #FFFFFF;
+  --cold:     #5A6169;   /* the ordinary path, drawn in plain grey ink */
+  --cold-dim: #E4E7EA;
+  --alarm:    #8B939C;   /* "no data" reads neutral, not alarming */
+  --good:     #1F6B45;
 
-  --grid-pending: #1A222D;
-  --grid-skip:    #121820;
-  --grid-done:    #24313F;
-
-  --shadow: 0 1px 0 rgba(255,255,255,.02), 0 12px 32px -18px rgba(0,0,0,.9);
+  --grid-pending: #ECEEF1;
+  --grid-skip:    #F7F8FA;
+  --grid-done:    #C6CCD3;
 
   --f-display: "Archivo", "Helvetica Neue", Arial, sans-serif;
-  --f-body: "Source Serif 4", Georgia, "Times New Roman", serif;
+  --f-body: "IBM Plex Sans", "Segoe UI", Helvetica, Arial, sans-serif;
   --f-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Consolas, monospace;
 
-  --col: 65ch;
+  --col: 68ch;
   --pad: clamp(1.1rem, 4vw, 2.5rem);
-}
-@media (prefers-color-scheme: light) {
-  :root:not([data-theme="dark"]) {
-    --ground:   #F2F5F8;
-    --surface:  #FFFFFF;
-    --raised:   #F7F9FB;
-    --line:     #D8E0E9;
-    --line-soft:#E6EBF1;
-    --text:     #0E1620;
-    --muted:    #5A6878;
-    --faint:    #93A1B1;
-    --hot:      #A35F00;
-    --hot-dim:  #F3DCAE;
-    --hot-ink:  #FFFFFF;
-    --cold:     #3E648A;
-    --cold-dim: #CBD9E6;
-    --alarm:    #B23A31;
-    --good:     #1E7A50;
-    --grid-pending: #E3E9F0;
-    --grid-skip:    #EDF1F5;
-    --grid-done:    #C3D0DD;
-    --shadow: 0 1px 0 rgba(255,255,255,.6), 0 10px 26px -20px rgba(16,32,52,.5);
-  }
-}
-:root[data-theme="light"] {
-  --ground:   #F2F5F8;
-  --surface:  #FFFFFF;
-  --raised:   #F7F9FB;
-  --line:     #D8E0E9;
-  --line-soft:#E6EBF1;
-  --text:     #0E1620;
-  --muted:    #5A6878;
-  --faint:    #93A1B1;
-  --hot:      #A35F00;
-  --hot-dim:  #F3DCAE;
-  --hot-ink:  #FFFFFF;
-  --cold:     #3E648A;
-  --cold-dim: #CBD9E6;
-  --alarm:    #B23A31;
-  --good:     #1E7A50;
-  --grid-pending: #E3E9F0;
-  --grid-skip:    #EDF1F5;
-  --grid-done:    #C3D0DD;
-  --shadow: 0 1px 0 rgba(255,255,255,.6), 0 10px 26px -20px rgba(16,32,52,.5);
 }
 
 * { box-sizing: border-box; }
@@ -99,13 +54,13 @@ body {
   background: var(--ground);
   color: var(--text);
   font-family: var(--f-body);
-  font-size: 17px;
-  line-height: 1.65;
+  font-size: 16.5px;
+  line-height: 1.62;
   -webkit-font-smoothing: antialiased;
 }
 a { color: inherit; text-decoration-color: var(--faint); text-underline-offset: 3px; }
-a:hover { text-decoration-color: var(--hot); }
-:focus-visible { outline: 2px solid var(--hot); outline-offset: 3px; border-radius: 2px; }
+a:hover { text-decoration-color: var(--hot); color: var(--hot); }
+:focus-visible { outline: 2px solid var(--hot); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
   * { animation-duration: .001ms !important; transition-duration: .001ms !important; }
@@ -114,200 +69,240 @@ a:hover { text-decoration-color: var(--hot); }
 .wrap { max-width: 1180px; margin: 0 auto; padding-inline: var(--pad); }
 
 h1, h2, h3 { font-family: var(--f-display); font-weight: 700; text-wrap: balance; margin: 0; }
-h1 { font-size: clamp(2.4rem, 6.5vw, 4.1rem); line-height: 1.02; letter-spacing: -.028em; font-weight: 800; }
-h2 { font-size: clamp(1.5rem, 3.2vw, 2.05rem); line-height: 1.12; letter-spacing: -.02em; }
-h3 { font-size: 1.02rem; line-height: 1.3; letter-spacing: -.008em; }
+h1 { font-size: clamp(2.3rem, 6.2vw, 3.9rem); line-height: 1.03; letter-spacing: -.03em; font-weight: 800; }
+h2 { font-size: clamp(1.45rem, 3vw, 1.95rem); line-height: 1.14; letter-spacing: -.021em; }
+h3 { font-size: 1rem; line-height: 1.3; letter-spacing: -.006em; }
 p  { margin: 0; }
 
+/* mono labels do a lot of the structural work on this page */
 .eyebrow {
-  font-family: var(--f-mono); font-size: .705rem; font-weight: 500;
-  letter-spacing: .16em; text-transform: uppercase; color: var(--muted);
+  font-family: var(--f-mono); font-size: .69rem; font-weight: 500;
+  letter-spacing: .15em; text-transform: uppercase; color: var(--muted);
 }
-.lede { font-size: 1.16rem; line-height: 1.55; }
+.figno {
+  font-family: var(--f-mono); font-size: .69rem; font-weight: 600;
+  letter-spacing: .12em; text-transform: uppercase; color: var(--hot);
+}
+.lede { font-size: 1.1rem; line-height: 1.55; }
 .dim  { color: var(--muted); }
 .mono { font-family: var(--f-mono); font-variant-numeric: tabular-nums; }
 code {
-  font-family: var(--f-mono); font-size: .86em;
+  font-family: var(--f-mono); font-size: .87em;
   background: var(--raised); border: 1px solid var(--line-soft);
-  padding: .08em .34em; border-radius: 3px;
+  padding: .06em .32em;
 }
 
-/* --- masthead --------------------------------------------------- */
+/* --- masthead ----------------------------------------------------
+   A running head, the way a spec sheet repeats its document title. */
 .masthead {
-  border-bottom: 1px solid var(--line);
-  background: color-mix(in srgb, var(--ground) 86%, transparent);
-  position: sticky; top: 0; z-index: 20; backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--text);
+  background: var(--ground);
+  position: sticky; top: 0; z-index: 20;
 }
 .masthead-in {
   display: flex; align-items: center; gap: 1rem;
-  height: 52px; max-width: 1180px; margin: 0 auto; padding-inline: var(--pad);
+  height: 48px; max-width: 1180px; margin: 0 auto; padding-inline: var(--pad);
 }
 .brand {
-  font-family: var(--f-mono); font-size: .78rem; font-weight: 600;
-  letter-spacing: .03em; text-decoration: none; display: flex; align-items: center; gap: .55rem;
+  font-family: var(--f-mono); font-size: .77rem; font-weight: 600;
+  letter-spacing: .02em; text-decoration: none; display: flex; align-items: center; gap: .55rem;
 }
-.masthead nav { margin-left: auto; display: flex; align-items: center; gap: 1.15rem; }
+.brand:hover { color: var(--text); }
+.masthead nav { margin-left: auto; display: flex; align-items: center; gap: 1.2rem; }
 .masthead nav a {
-  font-family: var(--f-mono); font-size: .74rem; color: var(--muted);
-  text-decoration: none; letter-spacing: .02em;
+  font-family: var(--f-mono); font-size: .735rem; color: var(--muted);
+  text-decoration: none; letter-spacing: .01em;
 }
-.masthead nav a:hover { color: var(--text); }
-.theme-btn {
-  font-family: var(--f-mono); font-size: .67rem; letter-spacing: .08em; text-transform: uppercase;
-  background: transparent; color: var(--muted); border: 1px solid var(--line);
-  padding: .3rem .55rem; border-radius: 3px; cursor: pointer;
-}
-.theme-btn:hover { color: var(--text); border-color: var(--faint); }
+.masthead nav a:hover { color: var(--hot); }
 @media (max-width: 780px) { .nav-extra { display: none; } }
 
-/* --- hero -------------------------------------------------------- */
-.hero { padding-block: clamp(2.4rem, 6.5vw, 4.4rem) clamp(1.5rem, 4vw, 2.2rem); }
-.hero-grid { display: grid; gap: clamp(1.4rem, 3vw, 2.6rem); }
-@media (min-width: 940px) { .hero-grid { grid-template-columns: minmax(0,1.12fr) minmax(0,.88fr); align-items: end; } }
+/* --- hero: a drawing's title block -------------------------------- */
+.hero { padding-block: clamp(2.4rem, 6vw, 4rem) clamp(1.6rem, 4vw, 2.4rem); }
+.hero-grid { display: grid; gap: clamp(1.6rem, 3.5vw, 3rem); }
+@media (min-width: 940px) { .hero-grid { grid-template-columns: minmax(0,1.08fr) minmax(0,.92fr); align-items: start; } }
 .hero h1 .accent { color: var(--hot); }
-.hero-copy { display: flex; flex-direction: column; gap: 1.05rem; max-width: 60ch; }
-.hero-meta { display: flex; flex-wrap: wrap; gap: .4rem; }
-.chip {
-  font-family: var(--f-mono); font-size: .7rem; letter-spacing: .03em;
-  border: 1px solid var(--line); background: var(--surface);
-  padding: .22rem .5rem; border-radius: 3px; color: var(--muted); white-space: nowrap;
-}
-.chip strong { color: var(--text); font-weight: 500; }
+.hero-copy { display: flex; flex-direction: column; gap: 1.1rem; max-width: 58ch; }
 
-.thesis { display: grid; gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
-@media (min-width: 480px) { .thesis { grid-template-columns: 1fr 1fr; } }
-.thesis-cell { background: var(--surface); padding: 1rem 1.1rem; display: flex; flex-direction: column; gap: .28rem; }
+/* the spec block: labelled fields, hairline separated */
+.spec { margin: 0; border-top: 1px solid var(--text); }
+.spec-row {
+  display: grid; grid-template-columns: 10.5rem minmax(0,1fr);
+  gap: .4rem 1rem; padding: .42rem 0; border-bottom: 1px solid var(--line);
+}
+@media (max-width: 460px) { .spec-row { grid-template-columns: 1fr; gap: .05rem; } }
+.spec dt {
+  font-family: var(--f-mono); font-size: .685rem; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--muted); padding-top: .12rem;
+}
+.spec dd { margin: 0; font-size: .93rem; }
+.spec dd .em { color: var(--hot); font-weight: 500; }
+
+/* the headline claim, as two measured cells */
+.thesis { display: grid; border: 1px solid var(--text); }
+@media (min-width: 470px) { .thesis { grid-template-columns: 1fr 1fr; } }
+.thesis-cell { padding: 1rem 1.05rem; display: flex; flex-direction: column; gap: .3rem; }
+.thesis-cell + .thesis-cell { border-top: 1px solid var(--line); }
+@media (min-width: 470px) {
+  .thesis-cell + .thesis-cell { border-top: 0; border-left: 1px solid var(--text); }
+}
 .thesis-num {
   font-family: var(--f-mono); font-variant-numeric: tabular-nums;
-  font-size: clamp(1.45rem, 4vw, 1.95rem); font-weight: 500; line-height: 1.1; letter-spacing: -.02em;
+  font-size: clamp(1.5rem, 4vw, 2rem); font-weight: 500; line-height: 1.08; letter-spacing: -.025em;
 }
 .thesis-cell.is-cold .thesis-num { color: var(--cold); }
 .thesis-cell.is-hot  .thesis-num { color: var(--hot); }
-.thesis-label { font-family: var(--f-mono); font-size: .68rem; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
-.thesis-sub { font-size: .86rem; color: var(--muted); line-height: 1.45; }
+.thesis-label { font-family: var(--f-mono); font-size: .665rem; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+.thesis-sub { font-size: .855rem; color: var(--muted); line-height: 1.45; }
 
-/* --- sections ---------------------------------------------------- */
-.section { padding-block: clamp(2.6rem, 6vw, 4.2rem); border-top: 1px solid var(--line); }
-.section-head { display: flex; flex-direction: column; gap: .65rem; margin-bottom: 1.7rem; max-width: var(--col); }
+/* --- sections ------------------------------------------------------ */
+.section { padding-block: clamp(2.4rem, 5.5vw, 3.8rem); border-top: 1.5px solid var(--text); }
+.section-head { display: flex; flex-direction: column; gap: .55rem; margin-bottom: 1.6rem; max-width: var(--col); }
 .prose { display: flex; flex-direction: column; gap: 1rem; }
 .prose p { max-width: var(--col); }
 .stack { display: flex; flex-direction: column; gap: 1.4rem; }
 
-/* --- panels ------------------------------------------------------ */
-.panel { background: var(--surface); border: 1px solid var(--line); border-radius: 5px; box-shadow: var(--shadow); overflow: hidden; }
-.panel-bar { display: flex; align-items: center; gap: .7rem; flex-wrap: wrap; padding: .6rem .85rem; border-bottom: 1px solid var(--line); background: var(--raised); }
-.panel-title { font-family: var(--f-mono); font-size: .71rem; letter-spacing: .11em; text-transform: uppercase; color: var(--muted); }
-.panel-body { padding: clamp(.85rem, 2.2vw, 1.2rem); }
-
-.controls { display: flex; flex-wrap: wrap; gap: .5rem .9rem; align-items: center; }
-.ctl { display: flex; align-items: center; gap: .38rem; }
-.ctl > label { font-family: var(--f-mono); font-size: .68rem; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
-select, input[type="number"] {
-  font-family: var(--f-mono); font-size: .76rem; color: var(--text);
-  background: var(--surface); border: 1px solid var(--line);
-  padding: .26rem .4rem; border-radius: 3px;
+/* --- figures ------------------------------------------------------- */
+.panel { background: var(--surface); border: 1px solid var(--text); }
+.panel-bar {
+  display: flex; align-items: center; gap: .8rem; flex-wrap: wrap;
+  padding: .5rem .8rem; border-bottom: 1px solid var(--line); background: var(--raised);
 }
-input[type="range"] { accent-color: var(--hot); width: 90px; }
+.panel-bar + .panel-bar { border-top: 0; }
+.panel-title { font-family: var(--f-mono); font-size: .7rem; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+.panel-body { padding: clamp(.85rem, 2.2vw, 1.15rem); }
+.figcap {
+  font-family: var(--f-mono); font-size: .68rem; color: var(--muted);
+  letter-spacing: .02em; padding-top: .55rem; line-height: 1.5; max-width: 78ch;
+}
+.figcap b { color: var(--text); font-weight: 600; letter-spacing: .1em; text-transform: uppercase; }
+
+/* --- controls ------------------------------------------------------ */
+.controls { display: flex; flex-wrap: wrap; gap: .45rem .9rem; align-items: center; }
+.ctl { display: flex; align-items: center; gap: .35rem; }
+.ctl > label { font-family: var(--f-mono); font-size: .67rem; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+select, input[type="number"] {
+  font-family: var(--f-mono); font-size: .755rem; color: var(--text);
+  background: var(--ground); border: 1px solid var(--line);
+  padding: .24rem .35rem; border-radius: 0;
+}
+select:hover, input[type="number"]:hover { border-color: var(--muted); }
+input[type="range"] { accent-color: var(--hot); width: 88px; }
 input[type="checkbox"] { accent-color: var(--hot); width: 14px; height: 14px; }
 .btn {
-  font-family: var(--f-mono); font-size: .74rem; font-weight: 500;
-  background: var(--surface); color: var(--text); border: 1px solid var(--line);
-  padding: .33rem .7rem; border-radius: 3px; cursor: pointer;
+  font-family: var(--f-mono); font-size: .735rem; font-weight: 500;
+  background: var(--ground); color: var(--text); border: 1px solid var(--text);
+  padding: .3rem .7rem; border-radius: 0; cursor: pointer;
 }
-.btn:hover { border-color: var(--faint); }
+.btn:hover { background: var(--text); color: var(--ground); }
 .btn.is-primary { background: var(--hot); color: var(--hot-ink); border-color: var(--hot); font-weight: 600; }
-.btn.is-primary:hover { filter: brightness(1.08); }
+.btn.is-primary:hover { background: var(--text); border-color: var(--text); color: var(--ground); }
 
-/* --- visualiser -------------------------------------------------- */
-.viz { display: grid; gap: 1rem; }
-@media (min-width: 960px) { .viz { grid-template-columns: minmax(0,1fr) 272px; } }
-canvas { display: block; flex: 0 0 auto; max-width: 100%; border-radius: 3px; cursor: pointer; }
-.axis-n { font-family: var(--f-mono); font-size: .645rem; letter-spacing: .09em; text-transform: uppercase; color: var(--faint); text-align: center; padding-bottom: .35rem; }
+/* --- visualiser ----------------------------------------------------- */
+.viz { display: grid; gap: 1.1rem; }
+@media (min-width: 960px) { .viz { grid-template-columns: minmax(0,1fr) 268px; } }
+canvas { display: block; flex: 0 0 auto; max-width: 100%; cursor: pointer; border: 1px solid var(--line); }
+.axis-n { font-family: var(--f-mono); font-size: .64rem; letter-spacing: .09em; text-transform: uppercase; color: var(--faint); text-align: center; padding-bottom: .35rem; }
 .axis-row { display: flex; gap: .45rem; align-items: stretch; }
-.axis-m { font-family: var(--f-mono); font-size: .645rem; letter-spacing: .09em; text-transform: uppercase; color: var(--faint); writing-mode: vertical-rl; transform: rotate(180deg); text-align: center; flex: none; }
+.axis-m { font-family: var(--f-mono); font-size: .64rem; letter-spacing: .09em; text-transform: uppercase; color: var(--faint); writing-mode: vertical-rl; transform: rotate(180deg); text-align: center; flex: none; }
 
-.readout { display: flex; flex-direction: column; gap: .55rem; }
-.rd-group { border: 1px solid var(--line); border-radius: 4px; background: var(--raised); padding: .6rem .7rem; display: flex; flex-direction: column; gap: .4rem; }
-.rd-head { font-family: var(--f-mono); font-size: .645rem; letter-spacing: .11em; text-transform: uppercase; color: var(--muted); }
+.readout { display: flex; flex-direction: column; gap: .6rem; }
+.rd-group { border: 1px solid var(--line); padding: .6rem .7rem; display: flex; flex-direction: column; gap: .38rem; }
+.rd-head {
+  font-family: var(--f-mono); font-size: .64rem; letter-spacing: .11em; text-transform: uppercase;
+  color: var(--text); font-weight: 600; padding-bottom: .3rem; border-bottom: 1px solid var(--line);
+}
 .rd-line { display: flex; align-items: baseline; justify-content: space-between; gap: .6rem; }
-.rd-key { font-family: var(--f-mono); font-size: .72rem; color: var(--muted); }
-.rd-val { font-family: var(--f-mono); font-size: .79rem; font-variant-numeric: tabular-nums; }
+.rd-key { font-family: var(--f-mono); font-size: .715rem; color: var(--muted); }
+.rd-val { font-family: var(--f-mono); font-size: .785rem; font-variant-numeric: tabular-nums; }
 .rd-val.is-hot  { color: var(--hot); }
 .rd-val.is-cold { color: var(--cold); }
 .rd-val.is-good { color: var(--good); }
-.rd-note { font-family: var(--f-mono); font-size: .655rem; color: var(--faint); line-height: 1.5; }
+.rd-note { font-family: var(--f-mono); font-size: .645rem; color: var(--faint); line-height: 1.5; }
 .flash-bg { animation: flashbg .55s ease-out; }
 @keyframes flashbg { from { background: var(--hot-dim); } to { background: transparent; } }
 
-.legend { display: flex; flex-wrap: wrap; gap: .4rem .9rem; padding-top: .55rem; }
-.lg { display: flex; align-items: center; gap: .35rem; font-family: var(--f-mono); font-size: .67rem; color: var(--muted); }
-.sw { width: 10px; height: 10px; border-radius: 2px; flex: none; border: 1px solid var(--line); }
-.bar-track { height: 3px; background: var(--grid-pending); border-radius: 2px; overflow: hidden; }
+.legend { display: flex; flex-wrap: wrap; gap: .35rem .9rem; padding-top: .6rem; }
+.lg { display: flex; align-items: center; gap: .35rem; font-family: var(--f-mono); font-size: .665rem; color: var(--muted); }
+.sw { width: 10px; height: 10px; flex: none; border: 1px solid var(--line); }
+.bar-track { height: 3px; background: var(--grid-pending); overflow: hidden; }
 .bar-fill { height: 100%; background: var(--hot); width: 0%; }
 
-/* --- tables ------------------------------------------------------ */
+/* --- tables --------------------------------------------------------- */
 .scroll-x { overflow-x: auto; }
-table { border-collapse: collapse; width: 100%; font-family: var(--f-mono); font-size: .775rem; font-variant-numeric: tabular-nums; }
-th, td { text-align: left; padding: .46rem .7rem; border-bottom: 1px solid var(--line-soft); white-space: nowrap; }
-th { font-size: .645rem; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); font-weight: 500; border-bottom-color: var(--line); }
+table { border-collapse: collapse; width: 100%; font-family: var(--f-mono); font-size: .765rem; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: .44rem .7rem; border-bottom: 1px solid var(--line-soft); white-space: nowrap; }
+th {
+  font-size: .64rem; letter-spacing: .1em; text-transform: uppercase; color: var(--text);
+  font-weight: 600; border-bottom: 1.5px solid var(--text);
+}
 td.num, th.num { text-align: right; }
 tbody tr:last-child td { border-bottom: none; }
-td.wide { white-space: normal; font-family: var(--f-body); font-size: .93rem; }
-.tag { font-family: var(--f-mono); font-size: .655rem; letter-spacing: .05em; text-transform: uppercase; padding: .1rem .38rem; border-radius: 2px; border: 1px solid; }
-.tag.done { color: var(--good); border-color: color-mix(in srgb, var(--good) 40%, transparent); }
-.tag.todo { color: var(--muted); border-color: var(--line); }
-.tag.oom  { color: var(--alarm); border-color: color-mix(in srgb, var(--alarm) 45%, transparent); }
+td.wide { white-space: normal; font-family: var(--f-body); font-size: .92rem; }
+.tag { font-family: var(--f-mono); font-size: .645rem; letter-spacing: .06em; text-transform: uppercase; padding: .08rem .36rem; border: 1px solid; }
+.tag.done { color: var(--text); border-color: var(--text); }
+.tag.todo { color: var(--faint); border-color: var(--line); }
+.tag.oom  { color: var(--alarm); border-color: var(--line); }
 
-/* --- calculator --------------------------------------------------- */
-.calc { display: grid; gap: 1.1rem; }
-@media (min-width: 880px) { .calc { grid-template-columns: 212px minmax(0,1fr); } }
-.calc-fields { display: flex; flex-direction: column; gap: .48rem; }
-.field { display: flex; align-items: center; justify-content: space-between; gap: .6rem; }
-.field label { font-family: var(--f-mono); font-size: .7rem; letter-spacing: .04em; color: var(--muted); }
-.field select, .field input { width: 100px; }
-.calc-out { display: flex; flex-direction: column; gap: .85rem; }
-.calc-rows { display: grid; gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
-.calc-row { background: var(--surface); padding: .6rem .8rem; display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
-.calc-row .k { font-family: var(--f-mono); font-size: .72rem; color: var(--muted); }
-.calc-row .v { font-family: var(--f-mono); font-size: .94rem; font-variant-numeric: tabular-nums; }
+/* --- calculator ------------------------------------------------------ */
+.calc { display: grid; gap: 1.2rem; }
+@media (min-width: 880px) { .calc { grid-template-columns: 216px minmax(0,1fr); } }
+.calc-fields { display: flex; flex-direction: column; border-top: 1px solid var(--text); }
+.field {
+  display: flex; align-items: center; justify-content: space-between; gap: .6rem;
+  padding: .34rem 0; border-bottom: 1px solid var(--line);
+}
+.field label { font-family: var(--f-mono); font-size: .69rem; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.field select, .field input { width: 104px; }
+.calc-out { display: flex; flex-direction: column; gap: .9rem; }
+.calc-rows { border: 1px solid var(--line); }
+.calc-row { padding: .58rem .78rem; display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+.calc-row + .calc-row { border-top: 1px solid var(--line); }
+.calc-row .k { font-family: var(--f-mono); font-size: .705rem; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+.calc-row .v { font-family: var(--f-mono); font-size: .95rem; font-variant-numeric: tabular-nums; }
 .calc-row.is-cold .v { color: var(--cold); }
 .calc-row.is-hot  .v { color: var(--hot); }
-.calc-row .note { flex-basis: 100%; font-family: var(--f-mono); font-size: .665rem; color: var(--faint); }
-.chart-hold { border: 1px solid var(--line); border-radius: 4px; background: var(--raised); padding: .7rem .75rem .5rem; }
+.calc-row .note { flex-basis: 100%; font-family: var(--f-mono); font-size: .655rem; color: var(--faint); }
+.chart-hold { border: 1px solid var(--line); padding: .7rem .75rem .45rem; }
 svg.chart { display: block; width: 100%; height: auto; }
 svg.chart text { font-family: var(--f-mono); font-size: 9px; fill: var(--faint); }
 
-.callout { border-left: 2px solid var(--hot); background: var(--surface); border-radius: 0 4px 4px 0; padding: .85rem 1.05rem; display: flex; flex-direction: column; gap: .4rem; max-width: var(--col); }
+/* --- note block, the way a datasheet flags one -------------------- */
+.callout {
+  border: 1px solid var(--text); padding: .85rem 1rem;
+  display: flex; flex-direction: column; gap: .4rem; max-width: var(--col);
+}
 .callout .eyebrow { color: var(--hot); }
-.callout p { font-size: .95rem; }
+.callout p { font-size: .93rem; }
 
-.filemap { font-family: var(--f-mono); font-size: .775rem; line-height: 1.8; display: flex; flex-direction: column; }
-.filemap a { display: flex; gap: .9rem; text-decoration: none; padding: .1rem .3rem; border-radius: 3px; flex-wrap: wrap; }
-.filemap a:hover { background: var(--raised); }
+/* --- source map ---------------------------------------------------- */
+.filemap { font-family: var(--f-mono); font-size: .765rem; border-top: 1px solid var(--text); display: flex; flex-direction: column; }
+.filemap a { display: flex; gap: .9rem; text-decoration: none; padding: .3rem .25rem; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.filemap a:hover { background: var(--raised); color: var(--text); }
+.filemap a:hover .p { color: var(--hot); }
 .filemap .p { color: var(--text); min-width: 21ch; }
 .filemap .d { color: var(--muted); }
 
-.paper-group { display: flex; flex-direction: column; gap: .75rem; }
-.paper-list { display: flex; flex-direction: column; gap: .65rem; margin: 0; padding: 0; list-style: none; }
-.paper { display: flex; flex-direction: column; gap: .1rem; font-size: .93rem; max-width: var(--col); }
-.paper .t { font-style: italic; }
-.paper .a { font-family: var(--f-mono); font-size: .69rem; color: var(--muted); letter-spacing: .02em; }
+.paper-group { display: flex; flex-direction: column; gap: .7rem; }
+.paper-list { display: flex; flex-direction: column; gap: .6rem; margin: 0; padding: 0; list-style: none; }
+.paper { display: flex; flex-direction: column; gap: .08rem; font-size: .91rem; max-width: var(--col); }
+.paper .t { font-weight: 500; }
+.paper .a { font-family: var(--f-mono); font-size: .685rem; color: var(--muted); letter-spacing: .01em; }
 
-.two-col { display: grid; gap: clamp(1.5rem, 4vw, 2.8rem); }
+.two-col { display: grid; gap: clamp(1.6rem, 4vw, 2.8rem); }
 @media (min-width: 840px) { .two-col { grid-template-columns: 1fr 1fr; align-items: start; } }
 
 pre.code {
-  font-family: var(--f-mono); font-size: .74rem; line-height: 1.62;
-  background: var(--raised); border: 1px solid var(--line); border-radius: 4px;
-  padding: .8rem .95rem; overflow-x: auto; margin: 0; color: var(--text);
+  font-family: var(--f-mono); font-size: .735rem; line-height: 1.6;
+  background: var(--raised); border: 1px solid var(--line);
+  padding: .8rem .9rem; overflow-x: auto; margin: 0; color: var(--text);
 }
 pre.code .c { color: var(--faint); }
 pre.code .h { color: var(--hot); }
 
-footer { border-top: 1px solid var(--line); padding-block: 2.2rem 3rem; }
-.foot-in { display: flex; flex-wrap: wrap; gap: .7rem 1.6rem; align-items: baseline; font-family: var(--f-mono); font-size: .72rem; color: var(--muted); }
+footer { border-top: 1.5px solid var(--text); padding-block: 1.8rem 3rem; }
+.foot-in { display: flex; flex-wrap: wrap; gap: .6rem 1.6rem; align-items: baseline; font-family: var(--f-mono); font-size: .705rem; color: var(--muted); }
 .foot-in a { text-decoration: none; }
-.foot-in a:hover { color: var(--text); }
+.foot-in a:hover { color: var(--hot); }
 </style>
 </head>
 <body>
@@ -317,9 +312,9 @@ footer { border-top: 1px solid var(--line); padding-block: 2.2rem 3rem; }
     <a class="brand" href="#top">
       <svg width="13" height="13" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
         <rect x="0" y="0" width="14" height="14" fill="var(--hot)"/>
-        <rect x="18" y="0" width="14" height="14" fill="var(--cold)"/>
-        <rect x="0" y="18" width="14" height="14" fill="var(--cold)"/>
-        <rect x="18" y="18" width="14" height="14" fill="var(--hot)"/>
+        <rect x="18" y="0" width="14" height="14" fill="var(--grid-done)"/>
+        <rect x="0" y="18" width="14" height="14" fill="var(--grid-done)"/>
+        <rect x="18" y="18" width="14" height="14" fill="var(--grid-done)"/>
       </svg>
       flash-attn-triton
     </a>
@@ -329,7 +324,6 @@ footer { border-top: 1px solid var(--line); padding-block: 2.2rem 3rem; }
       <a class="nav-extra" href="#exact">exactness</a>
       <a href="#bench">benchmarks</a>
       <a href="https://github.com/Ansh101112/flashattention">github</a>
-      <button class="theme-btn" id="themeBtn" type="button" aria-label="Switch colour theme">theme</button>
     </nav>
   </div>
 </header>
@@ -346,14 +340,16 @@ footer { border-top: 1px solid var(--line); padding-block: 2.2rem 3rem; }
       because of the maths. These kernels do the same arithmetic as ordinary attention &mdash;
       more of it, in the backward pass &mdash; and still win, purely by never writing the
       N&times;N score matrix to GPU main memory.</p>
-      <div class="hero-meta">
-        <span class="chip"><strong>exact</strong>, not approximate</span>
-        <span class="chip">fp16 &amp; bf16</span>
-        <span class="chip">causal masking</span>
-        <span class="chip">head dim <strong>32/64/128</strong></span>
-        <span class="chip">autotuned</span>
-        <span class="chip">MIT</span>
-      </div>
+      <dl class="spec">
+        <div class="spec-row"><dt>algorithm</dt><dd>FlashAttention-2, forward and backward</dd></div>
+        <div class="spec-row"><dt>result</dt><dd><span class="em">exact</span> &mdash; not an approximation</dd></div>
+        <div class="spec-row"><dt>precision</dt><dd>fp16, bf16</dd></div>
+        <div class="spec-row"><dt>head dim</dt><dd>32, 64, 128</dd></div>
+        <div class="spec-row"><dt>masking</dt><dd>causal and full, mask applied on the diagonal only</dd></div>
+        <div class="spec-row"><dt>tile sizes</dt><dd>autotuned over BLOCK_M, BLOCK_N, warps, stages</dd></div>
+        <div class="spec-row"><dt>target</dt><dd>NVIDIA SM 80+, CUDA PyTorch, Triton</dd></div>
+        <div class="spec-row"><dt>licence</dt><dd>MIT</dd></div>
+      </dl>
     </div>
 
     <div class="thesis" id="thesisBox">
@@ -383,7 +379,8 @@ footer { border-top: 1px solid var(--line); padding-block: 2.2rem 3rem; }
 
   <div class="panel">
     <div class="panel-bar">
-      <span class="panel-title">_attn_fwd</span>
+      <span class="figno">Fig. 1</span>
+      <span class="panel-title">forward tile schedule &middot; _attn_fwd</span>
       <div class="controls" style="margin-left:auto">
         <button class="btn is-primary" id="playBtn" type="button">pause</button>
         <button class="btn" id="stepBtn" type="button">step</button>
@@ -490,7 +487,7 @@ footer { border-top: 1px solid var(--line); padding-block: 2.2rem 3rem; }
       M &asymp; 100 KB, d&sup2;/M is about 1/25.</p>
 
       <div class="callout">
-        <p class="eyebrow">The counterintuitive part</p>
+        <p class="eyebrow">Note &mdash; the counterintuitive part</p>
         <p>The backward pass does <em>more</em> arithmetic than the ordinary version, because
         it recomputes <code>P</code> from the saved <code>L</code> instead of reading it back.
         It is still faster. At these shapes attention is memory-bound, so trading FLOPs for
@@ -500,7 +497,7 @@ footer { border-top: 1px solid var(--line); padding-block: 2.2rem 3rem; }
 
     <div class="stack">
       <div class="panel">
-        <div class="panel-bar"><span class="panel-title">GPU memory hierarchy &middot; A100</span></div>
+        <div class="panel-bar"><span class="figno">Table 1</span><span class="panel-title">GPU memory hierarchy &middot; A100</span></div>
         <div class="panel-body scroll-x">
           <table>
             <thead><tr><th>Level</th><th class="num">Size</th><th class="num">Bandwidth</th></tr></thead>
@@ -513,7 +510,7 @@ footer { border-top: 1px solid var(--line); padding-block: 2.2rem 3rem; }
       </div>
 
       <div class="panel">
-        <div class="panel-bar"><span class="panel-title">HBM accesses</span></div>
+        <div class="panel-bar"><span class="figno">Table 2</span><span class="panel-title">HBM accesses</span></div>
         <div class="panel-body scroll-x">
           <table>
             <thead><tr><th>Implementation</th><th class="num">Complexity</th></tr></thead>
@@ -538,7 +535,7 @@ footer { border-top: 1px solid var(--line); padding-block: 2.2rem 3rem; }
   </div>
 
   <div class="panel">
-    <div class="panel-bar"><span class="panel-title">footprint calculator</span></div>
+    <div class="panel-bar"><span class="figno">Fig. 2</span><span class="panel-title">footprint calculator</span></div>
     <div class="panel-body">
       <div class="calc">
         <div class="calc-fields">
@@ -621,7 +618,7 @@ footer { border-top: 1px solid var(--line); padding-block: 2.2rem 3rem; }
     </div>
 
     <div class="panel">
-      <div class="panel-bar"><span class="panel-title">the update, per tile</span></div>
+      <div class="panel-bar"><span class="figno">Fig. 3</span><span class="panel-title">the update, per tile</span></div>
       <div class="panel-body">
 <pre class="code"><span class="c"># running state, resident in registers</span>
 m_i = -inf        <span class="c"># biggest score so far</span>
@@ -685,7 +682,7 @@ L   = m_i + log(l_i)      <span class="c"># N floats, not N x N</span></pre>
   </div>
   <div class="panel">
     <div class="panel-bar">
-      <span class="panel-title">bench/bench_attention.py</span>
+      <span class="figno">Table 3</span><span class="panel-title">bench/bench_attention.py</span>
       <span class="panel-title" id="benchMeta" style="margin-left:auto;color:var(--faint)"></span>
     </div>
     <div class="panel-body" id="benchBody">
@@ -782,26 +779,6 @@ attn = <span class="h">FlashSelfAttention</span>(embed_dim=1024, num_heads=16, c
 
 <script>
 "use strict";
-
-/* ================================================================
-   theme
-   ================================================================ */
-(function () {
-  var root = document.documentElement;
-  var saved = null;
-  try { saved = localStorage.getItem("fat-theme"); } catch (e) {}
-  if (saved === "light" || saved === "dark") root.setAttribute("data-theme", saved);
-  document.getElementById("themeBtn").addEventListener("click", function () {
-    var now = root.getAttribute("data-theme");
-    if (!now) now = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
-    var next = now === "dark" ? "light" : "dark";
-    root.setAttribute("data-theme", next);
-    try { localStorage.setItem("fat-theme", next); } catch (e) {}
-    readColors();
-    draw();
-    drawChart();
-  });
-})();
 
 /* ================================================================
    helpers
@@ -1314,11 +1291,13 @@ function drawChart() {
   });
 
   /* vram ceiling */
+  /* the ceiling is drawn in plain ink, so the one spot colour stays reserved
+     for the kernel's own curve */
   var vy = Y(vram);
   if (vy > T && vy < T + ih) {
     s += '<line x1="' + L + '" y1="' + vy.toFixed(1) + '" x2="' + (W - R) + '" y2="' + vy.toFixed(1) +
-         '" stroke="' + C.alarm + '" stroke-width="1" stroke-dasharray="4 3"/>';
-    s += '<text x="' + (W - R) + '" y="' + (vy - 5).toFixed(1) + '" text-anchor="end" fill="' + C.alarm + '">' +
+         '" stroke="' + C.text + '" stroke-width="1" stroke-dasharray="5 3"/>';
+    s += '<text x="' + (W - R) + '" y="' + (vy - 5).toFixed(1) + '" text-anchor="end" fill="' + C.text + '">' +
          cEl.V.options[cEl.V.selectedIndex].text + ' ceiling</text>';
   }
 
