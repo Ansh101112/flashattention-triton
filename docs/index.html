@@ -328,7 +328,7 @@ footer { border-top: 1px solid var(--line); padding-block: 2.2rem 3rem; }
       <a class="nav-extra" href="#why">why it wins</a>
       <a class="nav-extra" href="#exact">exactness</a>
       <a href="#bench">benchmarks</a>
-      <a href="https://github.com/Ansh101112/flashattention-triton">github</a>
+      <a href="https://github.com/Ansh101112/flashattention">github</a>
       <button class="theme-btn" id="themeBtn" type="button" aria-label="Switch colour theme">theme</button>
     </nav>
   </div>
@@ -617,7 +617,7 @@ footer { border-top: 1px solid var(--line); padding-block: 2.2rem 3rem; }
       normalisation to one divide after the loop, put queries in the outer loop so the
       accumulator stays in registers, and split the grid over the sequence dimension so long
       context with small batch still fills the SMs. Full derivation in
-      <a href="https://github.com/Ansh101112/flashattention-triton/blob/main/docs/DERIVATION.md">DERIVATION.md</a>.</p>
+      <a href="https://github.com/Ansh101112/flashattention/blob/main/docs/DERIVATION.md">DERIVATION.md</a>.</p>
     </div>
 
     <div class="panel">
@@ -703,13 +703,13 @@ L   = m_i + log(l_i)      <span class="c"># N floats, not N x N</span></pre>
         <h2>Where things live</h2>
       </div>
       <div class="filemap">
-        <a href="https://github.com/Ansh101112/flashattention-triton/blob/main/src/flash_attn_triton/kernels/fwd.py"><span class="p">kernels/fwd.py</span><span class="d">forward kernel, autotuned</span></a>
-        <a href="https://github.com/Ansh101112/flashattention-triton/blob/main/src/flash_attn_triton/kernels/bwd.py"><span class="p">kernels/bwd.py</span><span class="d">delta pre-pass, then dK/dV and dQ</span></a>
-        <a href="https://github.com/Ansh101112/flashattention-triton/blob/main/src/flash_attn_triton/interface.py"><span class="p">interface.py</span><span class="d">autograd.Function, flash_attn, module</span></a>
-        <a href="https://github.com/Ansh101112/flashattention-triton/blob/main/src/flash_attn_triton/reference.py"><span class="p">reference.py</span><span class="d">plain PyTorch attention, SDPA, FLOP count</span></a>
-        <a href="https://github.com/Ansh101112/flashattention-triton/blob/main/bench/bench_attention.py"><span class="p">bench/</span><span class="d">speed and memory measurement</span></a>
-        <a href="https://github.com/Ansh101112/flashattention-triton/blob/main/tests/test_correctness.py"><span class="p">tests/</span><span class="d">correctness and memory scaling</span></a>
-        <a href="https://github.com/Ansh101112/flashattention-triton/blob/main/docs/DERIVATION.md"><span class="p">docs/DERIVATION.md</span><span class="d">the maths, in full</span></a>
+        <a href="https://github.com/Ansh101112/flashattention/blob/main/src/flash_attn_triton/kernels/fwd.py"><span class="p">kernels/fwd.py</span><span class="d">forward kernel, autotuned</span></a>
+        <a href="https://github.com/Ansh101112/flashattention/blob/main/src/flash_attn_triton/kernels/bwd.py"><span class="p">kernels/bwd.py</span><span class="d">delta pre-pass, then dK/dV and dQ</span></a>
+        <a href="https://github.com/Ansh101112/flashattention/blob/main/src/flash_attn_triton/interface.py"><span class="p">interface.py</span><span class="d">autograd.Function, flash_attn, module</span></a>
+        <a href="https://github.com/Ansh101112/flashattention/blob/main/src/flash_attn_triton/reference.py"><span class="p">reference.py</span><span class="d">plain PyTorch attention, SDPA, FLOP count</span></a>
+        <a href="https://github.com/Ansh101112/flashattention/blob/main/bench/bench_attention.py"><span class="p">bench/</span><span class="d">speed and memory measurement</span></a>
+        <a href="https://github.com/Ansh101112/flashattention/blob/main/tests/test_correctness.py"><span class="p">tests/</span><span class="d">correctness and memory scaling</span></a>
+        <a href="https://github.com/Ansh101112/flashattention/blob/main/docs/DERIVATION.md"><span class="p">docs/DERIVATION.md</span><span class="d">the maths, in full</span></a>
       </div>
 
       <div class="panel">
@@ -774,8 +774,8 @@ attn = <span class="h">FlashSelfAttention</span>(embed_dim=1024, num_heads=16, c
 <footer class="wrap">
   <div class="foot-in">
     <span>flash-attn-triton &middot; MIT</span>
-    <a href="https://github.com/Ansh101112/flashattention-triton">source on github</a>
-    <a href="https://github.com/Ansh101112/flashattention-triton/blob/main/docs/DERIVATION.md">derivation</a>
+    <a href="https://github.com/Ansh101112/flashattention">source on github</a>
+    <a href="https://github.com/Ansh101112/flashattention/blob/main/docs/DERIVATION.md">derivation</a>
     <span class="dim">the visualiser runs the real online-softmax algebra in your browser; it does not run the Triton kernel</span>
   </div>
 </footer>
